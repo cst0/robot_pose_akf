@@ -16,10 +16,11 @@ __VERY_LARGE_COVARIANCE = 99999
 
 
 class INPUT_TYPE(Enum):
-    ODOM = 0
-    GNSS = 1
-    IMU = 2
-    CMD_VEL = 3
+    OUTPUT = 0
+    ODOM = 1
+    GNSS = 2
+    IMU = 3
+    CMD_VEL = 4
 
     def type_to_msg(_type):
         if _type == INPUT_TYPE.ODOM:
@@ -30,14 +31,23 @@ class INPUT_TYPE(Enum):
             return Imu
         if _type == INPUT_TYPE.CMD_VEL:
             return Twist
+        if _type == INPUT_TYPE.OUTPUT:
+            return None
 
 
-class RobotInputWrapper:
+class RobotStateWrapper:
     def __init__(self, topic, _type: INPUT_TYPE):
         self.topic = topic
         self.type = _type
+        self._as_odom = self._init_odom()
+        self._initial_gnss: Union[None, NavSatFix] = None
+        self._last_imu = Imu()
 
-        rospy.Subscriber(self.topic, INPUT_TYPE.type_to_msg(_type), self._cb)
+        if self.type is not INPUT_TYPE.OUTPUT:
+            rospy.Subscriber(self.topic, INPUT_TYPE.type_to_msg(_type), self._cb)
+
+    def get_odom(self):
+        return self._as_odom
 
     def _cb(self, msg):
         if self.type == INPUT_TYPE.ODOM:
@@ -50,31 +60,50 @@ class RobotInputWrapper:
             self._cb_cmd_vel(msg)
 
     def _cb_odom(self, msg: Odometry):
-        pass
+        self._as_odom = msg
 
     def _cb_gnss(self, msg: NavSatFix):
-        pass
+        rospy.logwarn_once("I have no idea if this will work.")
+        if (
+            msg.status.status >= 0
+        ):  # we have some kind of satellite fix, so we can use this message
+            if self._initial_gnss is None:
+                self._initial_gnss = msg
+            self._as_odom.pose.pose.position.x = (
+                self._initial_gnss.latitude - msg.latitude
+            )
+            self._as_odom.pose.pose.position.y = (
+                self._initial_gnss.longitude - msg.longitude
+            )
+            self._as_odom.pose.pose.position.z = (
+                self._initial_gnss.altitude - msg.altitude
+            )
+            self._as_odom.pose.covariance = msg.position_covariance
 
     def _cb_imu(self, msg: Imu):
-        pass
+        self._as_odom.pose.pose.orientation = msg.orientation
+        self._as_odom.twist.twist.angular = msg.angular_velocity
+        self._as_odom.twist.twist.linear.x = (
+            self._last_imu.linear_acceleration.x + msg.linear_acceleration.x
+        ) / 2
+        self._as_odom.twist.twist.linear.y = (
+            self._last_imu.linear_acceleration.y + msg.linear_acceleration.y
+        ) / 2
+        self._as_odom.twist.twist.linear.z = (
+            self._last_imu.linear_acceleration.z + msg.linear_acceleration.z
+        ) / 2
+        self._last_imu = msg
 
     def _cb_cmd_vel(self, msg: Twist):
-        pass
+        # twist is twist
+        self._as_odom.twist.twist = msg
+        # we have zero uncertainty about this message (it's cmd_vel), so set covariance accordingly
+        self._as_odom.twist.covariance = [
+            0 for _ in range(0, len(self._as_odom.twist.covariance))
+        ]
+        # not touching the other values since we don't know anything about position from a twist
 
-
-class RobotPoseAkf:
-    def __init__(self):
-        # Check if there are any inputs configured (or default to
-        # robot_pose_ekf interface), and create interfaces given those
-        # parameters.
-        self.inputs = self._init_inputs()
-        self.odom_combined_publisher, self.tf_broadcaster = self._init_outputs()
-        self._as_odom = self._init_odom()
-
-    def get_odom(self):
-        return self._as_odom
-
-    def _init_odom(self):
+    def _init_odom(self) -> Odometry:
         odom = Odometry()
         # 2 dimensional square array represented in 1d, so NxN is sqrt. We know it's 6x6 but this is cleaner I guess
         pose_covar_n = floor(sqrt(len(odom.pose.covariance)))
@@ -85,6 +114,18 @@ class RobotPoseAkf:
             init_covar[n + (n * pose_covar_n)] = __VERY_LARGE_COVARIANCE
         odom.pose.covariance = init_covar
         odom.twist.covariance = init_covar
+
+        return odom
+
+
+class RobotPoseAkf:
+    def __init__(self):
+        # Check if there are any inputs configured (or default to
+        # robot_pose_ekf interface), and create interfaces given those
+        # parameters.
+        self.inputs = self._init_inputs()
+        self.odom_combined_publisher, self.tf_broadcaster = self._init_outputs()
+        self.state = RobotStateWrapper(None, INPUT_TYPE.OUTPUT)
 
     def _init_inputs(self):
         # Any odom inputs?
@@ -116,12 +157,12 @@ class RobotPoseAkf:
 
         inputs = []
         for odom_input in odom_inputs:
-            inputs.append(RobotInputWrapper(odom_input, INPUT_TYPE.ODOM))
+            inputs.append(RobotStateWrapper(odom_input, INPUT_TYPE.ODOM))
         for gnss_input in gnss_inputs:
-            inputs.append(RobotInputWrapper(gnss_input, INPUT_TYPE.GNSS))
+            inputs.append(RobotStateWrapper(gnss_input, INPUT_TYPE.GNSS))
         for imu_input in imu_inputs:
-            inputs.append(RobotInputWrapper(imu_input, INPUT_TYPE.IMU))
-        inputs.append(RobotInputWrapper("cmd_vel", INPUT_TYPE.CMD_VEL))
+            inputs.append(RobotStateWrapper(imu_input, INPUT_TYPE.IMU))
+        inputs.append(RobotStateWrapper("cmd_vel", INPUT_TYPE.CMD_VEL))
         return inputs
 
     def _parse_topic_str(self, input_str: Union[str, None]) -> List[str]:
