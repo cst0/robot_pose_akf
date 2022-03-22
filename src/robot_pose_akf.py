@@ -81,6 +81,7 @@ class RobotStateWrapper:
             self._as_odom.pose.covariance = msg.position_covariance
 
     def _cb_imu(self, msg: Imu):
+        # TODO: set covar off of these vals
         self._as_odom.pose.pose.orientation = msg.orientation
         self._as_odom.twist.twist.angular = msg.angular_velocity
         self._as_odom.twist.twist.linear.x = (
