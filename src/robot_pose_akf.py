@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 
 import rospy
+from tf import transformations
+
 from enum import Enum
 from math import sqrt, floor
+from filterpy.kalman import KalmanFilter
+
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from sensor_msgs.msg import Imu, NavSatFix
@@ -35,7 +39,7 @@ class INPUT_TYPE(Enum):
             return None
 
 
-class RobotStateWrapper:
+class DataCollectionWrapper:
     def __init__(self, topic, _type: INPUT_TYPE):
         self.topic = topic
         self.type = _type
@@ -48,6 +52,45 @@ class RobotStateWrapper:
 
     def get_odom(self):
         return self._as_odom
+
+    def get_odom_as_state(self):
+        """
+        Return state vector and covariance.
+        """
+        o = self.get_odom()
+        (o_ox, o_oy, o_oz) = transformations.euler_from_quaternion(
+            o.pose.pose.orientation
+        )
+        return (
+            [
+                o.pose.pose.position.x,
+                o.pose.pose.position.y,
+                o.pose.pose.position.z,
+                o_ox,
+                o_oy,
+                o_oz,
+                o.twist.twist.linear.x,
+                o.twist.twist.linear.y,
+                o.twist.twist.linear.z,
+                o.twist.twist.angular.x,
+                o.twist.twist.angular.y,
+                o.twist.twist.angular.z,
+            ],
+            [
+                o.pose.covariance[0],
+                o.pose.covariance[7],
+                o.pose.covariance[14],
+                o.pose.covariance[21],
+                o.pose.covariance[28],
+                o.pose.covariance[35],
+                o.twist.covariance[0],
+                o.twist.covariance[7],
+                o.twist.covariance[14],
+                o.twist.covariance[21],
+                o.twist.covariance[28],
+                o.twist.covariance[35],
+            ],
+        )
 
     def _cb(self, msg):
         if self.type == INPUT_TYPE.ODOM:
@@ -126,7 +169,12 @@ class RobotPoseAkf:
         # parameters.
         self.inputs = self._init_inputs()
         self.odom_combined_publisher, self.tf_broadcaster = self._init_outputs()
-        self.state = RobotStateWrapper(None, INPUT_TYPE.OUTPUT)
+        self.state = DataCollectionWrapper(None, INPUT_TYPE.OUTPUT)
+
+        self.timer = rospy.Timer(rospy.Rate(30), self.cb_timer)
+
+    def cb_timer(self, event):
+        pass
 
     def _init_inputs(self):
         # Any odom inputs?
@@ -158,12 +206,12 @@ class RobotPoseAkf:
 
         inputs = []
         for odom_input in odom_inputs:
-            inputs.append(RobotStateWrapper(odom_input, INPUT_TYPE.ODOM))
+            inputs.append(DataCollectionWrapper(odom_input, INPUT_TYPE.ODOM))
         for gnss_input in gnss_inputs:
-            inputs.append(RobotStateWrapper(gnss_input, INPUT_TYPE.GNSS))
+            inputs.append(DataCollectionWrapper(gnss_input, INPUT_TYPE.GNSS))
         for imu_input in imu_inputs:
-            inputs.append(RobotStateWrapper(imu_input, INPUT_TYPE.IMU))
-        inputs.append(RobotStateWrapper("cmd_vel", INPUT_TYPE.CMD_VEL))
+            inputs.append(DataCollectionWrapper(imu_input, INPUT_TYPE.IMU))
+        inputs.append(DataCollectionWrapper("cmd_vel", INPUT_TYPE.CMD_VEL))
         return inputs
 
     def _parse_topic_str(self, input_str: Union[str, None]) -> List[str]:

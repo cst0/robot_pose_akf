@@ -3,7 +3,7 @@
   <name>robot_pose_akf</name>
   <version>0.0.1</version>
 
-  <description>Another Kalman Filtering package for robot pose estimation</description>
+  <description>Addresses some of the robot_pose_ekf TODO's by making Another Kalman Filtering package for robot pose estimation</description>
   <maintainer email="chris@cthierauf.com">cst (Chris Thierauf)</maintainer>
   <license>Apache 2.0</license>
 
